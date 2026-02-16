@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import datetime as dt
 import os
 from pathlib import Path
@@ -29,11 +30,51 @@ def load_config() -> dict:
         "google_service_account_file": os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip(),
         "results_dir": os.getenv("RESULTS_DIR", "results").strip(),
     }
-
-    if not config["alpaca_api_key"] or not config["alpaca_api_secret"]:
-        raise ValueError("Missing ALPACA_API_KEY/ALPACA_API_SECRET in environment.")
-
     return config
+
+
+def validate_config(cfg: dict) -> tuple[bool, list[str]]:
+    messages: list[str] = []
+    ok = True
+
+    if not cfg["alpaca_api_key"]:
+        ok = False
+        messages.append("Missing ALPACA_API_KEY")
+    if not cfg["alpaca_api_secret"]:
+        ok = False
+        messages.append("Missing ALPACA_API_SECRET")
+
+    if cfg["google_sheet_id"] and not cfg["google_service_account_file"]:
+        messages.append("GOOGLE_SHEET_ID set but GOOGLE_SERVICE_ACCOUNT_FILE missing")
+    if cfg["google_service_account_file"] and not Path(cfg["google_service_account_file"]).exists():
+        messages.append("GOOGLE_SERVICE_ACCOUNT_FILE path does not exist")
+
+    if cfg["yellow_tolerance_pct"] <= 0:
+        ok = False
+        messages.append("YELLOW_TOLERANCE_PCT must be > 0")
+
+    if not cfg["universe_exchanges"]:
+        ok = False
+        messages.append("UNIVERSE_EXCHANGES cannot be empty")
+
+    return ok, messages
+
+
+def print_config_check(cfg: dict) -> bool:
+    ok, messages = validate_config(cfg)
+    print("EMAtrix config check")
+    print(f"- Exchanges: {', '.join(cfg['universe_exchanges'])}")
+    print(f"- Data feed: {cfg['data_feed']}")
+    print(f"- Include ETFs: {cfg['include_etfs']}")
+    print(f"- Results dir: {cfg['results_dir']}")
+    print(f"- Google configured: {bool(cfg['google_sheet_id'] and cfg['google_service_account_file'])}")
+    print(f"- Discord configured: {bool(cfg['discord_webhook_url'])}")
+    if messages:
+        print("\nConfig notes:")
+        for msg in messages:
+            print(f"- {msg}")
+    print(f"\nStatus: {'PASS' if ok else 'FAIL'}")
+    return ok
 
 
 def alpaca_headers(cfg: dict) -> dict:
@@ -58,8 +99,7 @@ def get_us_universe(cfg: dict) -> List[str]:
             continue
         if asset.get("exchange") not in allowed_exchanges:
             continue
-        if not cfg["include_etfs"] and asset.get("attributes") and "etb" in asset.get("attributes", []):
-            # Very lightweight filter toggle for users who do not want ETF-like instruments.
+        if not cfg["include_etfs"] and asset.get("easy_to_borrow"):
             continue
         symbol = asset.get("symbol")
         if symbol:
@@ -80,7 +120,6 @@ def chunked(items: Iterable[str], size: int) -> Iterable[List[str]]:
 
 
 def fetch_daily_bars(cfg: dict, symbols: List[str]) -> pd.DataFrame:
-    """Fetch daily bars using Alpaca v2 stocks bars endpoint in batches."""
     if not symbols:
         return pd.DataFrame()
 
@@ -200,7 +239,6 @@ def filter_green_band(latest: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_yellow_watchlist(latest: pd.DataFrame, green_symbols: set[str], tolerance_pct: float) -> pd.DataFrame:
-    """Find symbols that are close to entering the green band within tolerance."""
     if latest.empty:
         return latest
 
@@ -356,37 +394,23 @@ def send_discord_alerts(
     remain_txt = ", ".join(remaining[:40]) if remaining else "None"
     exited_txt = ", ".join(exited[:40]) if exited else "None"
 
-    _send_discord_message(
-        webhook,
-        (
-            "🟢 **New companies entering the band**\n"
-            f"Count: **{len(new_entries)}**\n"
-            f"Symbols: {new_txt}"
-        ),
-    )
-    _send_discord_message(
-        webhook,
-        (
-            "🟡 **Companies that remain in the band**\n"
-            f"Count: **{len(remaining)}**\n"
-            f"Symbols: {remain_txt}"
-        ),
-    )
-    _send_discord_message(
-        webhook,
-        (
-            "🔴 **Companies that exited the band**\n"
-            f"Count: **{len(exited)}**\n"
-            f"Symbols: {exited_txt}"
-        ),
-    )
+    _send_discord_message(webhook, f"🟢 **New companies entering the band**\nCount: **{len(new_entries)}**\nSymbols: {new_txt}")
+    _send_discord_message(webhook, f"🟡 **Companies that remain in the band**\nCount: **{len(remaining)}**\nSymbols: {remain_txt}")
+    _send_discord_message(webhook, f"🔴 **Companies that exited the band**\nCount: **{len(exited)}**\nSymbols: {exited_txt}")
 
 
-def main() -> None:
+def run_scan(dry_run: bool = False, max_symbols: int | None = None) -> None:
     cfg = load_config()
+    ok, messages = validate_config(cfg)
+    if not ok:
+        raise ValueError("Invalid config:\n- " + "\n- ".join(messages))
 
     print("Loading US tradable universe from Alpaca assets...")
     universe = get_us_universe(cfg)
+    if max_symbols:
+        universe = universe[:max_symbols]
+        print(f"Dry run symbol limit enabled: {max_symbols}")
+
     print(f"Universe size: {len(universe)} symbols across {', '.join(cfg['universe_exchanges'])}")
 
     print("Fetching daily bars...")
@@ -413,15 +437,18 @@ def main() -> None:
     current_symbols = set(green["symbol"].tolist())
     new_entries, remaining, exited = classify_band_transitions(current_symbols, previous_symbols)
 
-    try:
-        push_google_sheet(green, yellow, latest, cfg)
-    except Exception as exc:
-        print(f"Warning: Google Sheets update failed: {exc}")
+    if dry_run:
+        print("Dry run mode enabled: skipping Google Sheets + Discord notifications.")
+    else:
+        try:
+            push_google_sheet(green, yellow, latest, cfg)
+        except Exception as exc:
+            print(f"Warning: Google Sheets update failed: {exc}")
 
-    try:
-        send_discord_alerts(cfg, green_csv_path, len(green), new_entries, remaining, exited)
-    except Exception as exc:
-        print(f"Warning: Discord update failed: {exc}")
+        try:
+            send_discord_alerts(cfg, green_csv_path, len(green), new_entries, remaining, exited)
+        except Exception as exc:
+            print(f"Warning: Discord update failed: {exc}")
 
     print("\nTop 20 green symbols:")
     if green.empty:
@@ -429,6 +456,27 @@ def main() -> None:
     else:
         display_cols = ["symbol", "close", "ema_48", "ema_200", "rsi_14"]
         print(green[display_cols].head(20).to_string(index=False))
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="EMAtrix scanner")
+    parser.add_argument("--check-config", action="store_true", help="Validate local .env settings and exit")
+    parser.add_argument("--dry-run", action="store_true", help="Run scan and write CSVs but skip Google/Discord")
+    parser.add_argument("--max-symbols", type=int, default=None, help="Optional symbol cap for testing/dry-runs")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    cfg = load_config()
+
+    if args.check_config:
+        passed = print_config_check(cfg)
+        if not passed:
+            raise SystemExit(1)
+        return
+
+    run_scan(dry_run=args.dry_run, max_symbols=args.max_symbols)
 
 
 if __name__ == "__main__":

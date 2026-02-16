@@ -8,6 +8,24 @@ EMAtrix runs a **daily post-market scan** for US tradable equities and flags sym
 
 It also builds a **yellow watchlist** for symbols within a configurable tolerance of entering the green band.
 
+## What’s new for non-technical setup
+
+- `setup_and_run.sh` creates a local virtual environment, installs dependencies, checks config, and runs a safe dry-run.
+- `scanner.py --check-config` gives a guided config validation report.
+- `scanner.py --dry-run` writes CSV outputs but skips Google Sheets and Discord notifications.
+- `build_dashboard.py` generates local 2D and 3D HTML charts from the latest snapshot CSV.
+- `kalshi_demo.py` is a starter scaffold for Kalshi demo configuration checks.
+
+## Quick start (recommended)
+
+```bash
+./setup_and_run.sh
+```
+
+If `.env` does not exist, the script creates it from `.env.example` and stops so you can add your keys.
+
+After adding keys, run again.
+
 ## Outputs
 
 - Local CSV files:
@@ -26,18 +44,21 @@ It also builds a **yellow watchlist** for symbols within a configurable toleranc
 
 ## Setup
 
-1. Create/activate a Python virtual environment.
-2. Install dependencies:
+### 1) Create and activate a virtual environment
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-3. Copy env template and fill values:
+### 2) Configure environment variables
 
 ```bash
 cp .env.example .env
 ```
+
+Edit `.env` and fill your credentials.
 
 ## Environment variables
 
@@ -46,7 +67,7 @@ Required:
 - `ALPACA_API_KEY`
 - `ALPACA_API_SECRET`
 
-Optional:
+Optional scanner settings:
 
 - `ALPACA_BASE_URL` (default: `https://paper-api.alpaca.markets`)
 - `ALPACA_DATA_URL` (default: `https://data.alpaca.markets`)
@@ -60,7 +81,27 @@ Optional:
 - `GOOGLE_SERVICE_ACCOUNT_FILE`
 - `RESULTS_DIR` (default: `results`)
 
-## Run manually
+Kalshi demo scaffold (optional):
+
+- `KALSHI_BASE_URL` (default: `https://demo-api.kalshi.co`)
+- `KALSHI_EMAIL`
+- `KALSHI_PASSWORD`
+
+## Run scanner
+
+### Config check
+
+```bash
+python scanner.py --check-config
+```
+
+### Safe first run (no external notifications)
+
+```bash
+python scanner.py --dry-run --max-symbols 200
+```
+
+### Full run
 
 ```bash
 python scanner.py
@@ -84,6 +125,29 @@ When webhook integration is enabled, EMAtrix sends:
 2. New companies entering green band
 3. Companies remaining in green band
 4. Companies exited from green band
+
+## Local 2D + 3D chart generation
+
+After you have at least one `snapshot_*.csv` file:
+
+```bash
+python build_dashboard.py
+```
+
+Outputs:
+
+- `dashboards/ematrix_2d_latest.html`
+- `dashboards/ematrix_3d_latest.html`
+
+Open those HTML files in your browser.
+
+## Kalshi demo scaffold check
+
+```bash
+python kalshi_demo.py
+```
+
+This currently checks environment setup and a public API status endpoint. Auth wiring is intentionally deferred until you provide credentials.
 
 ## Scheduling
 
