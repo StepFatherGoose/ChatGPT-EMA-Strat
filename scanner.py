@@ -16,11 +16,14 @@ def load_config() -> dict:
     load_dotenv()
     exchanges = [e.strip().upper() for e in os.getenv("UNIVERSE_EXCHANGES", "NYSE,NASDAQ,AMEX").split(",") if e.strip()]
     config = {
+        "data_provider": os.getenv("DATA_PROVIDER", "stooq").strip().lower(),
         "alpaca_api_key": os.getenv("ALPACA_API_KEY", "").strip(),
         "alpaca_api_secret": os.getenv("ALPACA_API_SECRET", "").strip(),
         "alpaca_base_url": os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets").strip(),
         "alpaca_data_url": os.getenv("ALPACA_DATA_URL", "https://data.alpaca.markets").strip(),
         "data_feed": os.getenv("ALPACA_DATA_FEED", "iex").strip(),
+        "stooq_symbol_source": os.getenv("STOOQ_SYMBOL_SOURCE", "sec").strip().lower(),
+        "symbol_limit": int(os.getenv("SYMBOL_LIMIT", "400")),
         "lookback_days": int(os.getenv("LOOKBACK_DAYS", "320")),
         "include_etfs": os.getenv("INCLUDE_ETFS", "true").strip().lower() == "true",
         "universe_exchanges": exchanges or ["NYSE", "NASDAQ", "AMEX"],
@@ -37,12 +40,17 @@ def validate_config(cfg: dict) -> tuple[bool, list[str]]:
     messages: list[str] = []
     ok = True
 
-    if not cfg["alpaca_api_key"]:
+    if cfg["data_provider"] not in {"alpaca", "stooq"}:
         ok = False
-        messages.append("Missing ALPACA_API_KEY")
-    if not cfg["alpaca_api_secret"]:
-        ok = False
-        messages.append("Missing ALPACA_API_SECRET")
+        messages.append("DATA_PROVIDER must be one of: alpaca, stooq")
+
+    if cfg["data_provider"] == "alpaca":
+        if not cfg["alpaca_api_key"]:
+            ok = False
+            messages.append("Missing ALPACA_API_KEY (required for DATA_PROVIDER=alpaca)")
+        if not cfg["alpaca_api_secret"]:
+            ok = False
+            messages.append("Missing ALPACA_API_SECRET (required for DATA_PROVIDER=alpaca)")
 
     if cfg["google_sheet_id"] and not cfg["google_service_account_file"]:
         messages.append("GOOGLE_SHEET_ID set but GOOGLE_SERVICE_ACCOUNT_FILE missing")
@@ -53,9 +61,9 @@ def validate_config(cfg: dict) -> tuple[bool, list[str]]:
         ok = False
         messages.append("YELLOW_TOLERANCE_PCT must be > 0")
 
-    if not cfg["universe_exchanges"]:
+    if cfg["symbol_limit"] <= 0:
         ok = False
-        messages.append("UNIVERSE_EXCHANGES cannot be empty")
+        messages.append("SYMBOL_LIMIT must be > 0")
 
     return ok, messages
 
@@ -63,9 +71,10 @@ def validate_config(cfg: dict) -> tuple[bool, list[str]]:
 def print_config_check(cfg: dict) -> bool:
     ok, messages = validate_config(cfg)
     print("EMAtrix config check")
+    print(f"- Data provider: {cfg['data_provider']}")
     print(f"- Exchanges: {', '.join(cfg['universe_exchanges'])}")
+    print(f"- Symbol limit: {cfg['symbol_limit']}")
     print(f"- Data feed: {cfg['data_feed']}")
-    print(f"- Include ETFs: {cfg['include_etfs']}")
     print(f"- Results dir: {cfg['results_dir']}")
     print(f"- Google configured: {bool(cfg['google_sheet_id'] and cfg['google_service_account_file'])}")
     print(f"- Discord configured: {bool(cfg['discord_webhook_url'])}")
@@ -84,8 +93,7 @@ def alpaca_headers(cfg: dict) -> dict:
     }
 
 
-def get_us_universe(cfg: dict) -> List[str]:
-    """Fetch active tradable US equities for major US exchanges."""
+def get_us_universe_alpaca(cfg: dict) -> List[str]:
     url = f"{cfg['alpaca_base_url'].rstrip('/')}/v2/assets"
     params = {"status": "active", "asset_class": "us_equity"}
     response = requests.get(url, headers=alpaca_headers(cfg), params=params, timeout=60)
@@ -99,13 +107,39 @@ def get_us_universe(cfg: dict) -> List[str]:
             continue
         if asset.get("exchange") not in allowed_exchanges:
             continue
-        if not cfg["include_etfs"] and asset.get("easy_to_borrow"):
-            continue
         symbol = asset.get("symbol")
         if symbol:
             symbols.append(symbol)
-
     return sorted(set(symbols))
+
+
+def get_us_universe_stooq(cfg: dict) -> List[str]:
+    # SEC ticker list is free and public.
+    if cfg["stooq_symbol_source"] != "sec":
+        raise ValueError("STOOQ_SYMBOL_SOURCE currently supports only: sec")
+
+    response = requests.get("https://www.sec.gov/files/company_tickers.json", timeout=60)
+    response.raise_for_status()
+    payload = response.json()
+
+    symbols: list[str] = []
+    for _, row in payload.items():
+        ticker = str(row.get("ticker", "")).strip().upper()
+        if not ticker:
+            continue
+        if "^" in ticker or "/" in ticker or "." in ticker:
+            continue
+        symbols.append(ticker)
+
+    symbols = sorted(set(symbols))
+    return symbols[: cfg["symbol_limit"]]
+
+
+def get_universe(cfg: dict) -> List[str]:
+    if cfg["data_provider"] == "alpaca":
+        symbols = get_us_universe_alpaca(cfg)
+        return symbols[: cfg["symbol_limit"]]
+    return get_us_universe_stooq(cfg)
 
 
 def chunked(items: Iterable[str], size: int) -> Iterable[List[str]]:
@@ -119,7 +153,7 @@ def chunked(items: Iterable[str], size: int) -> Iterable[List[str]]:
         yield bucket
 
 
-def fetch_daily_bars(cfg: dict, symbols: List[str]) -> pd.DataFrame:
+def fetch_daily_bars_alpaca(cfg: dict, symbols: List[str]) -> pd.DataFrame:
     if not symbols:
         return pd.DataFrame()
 
@@ -139,7 +173,6 @@ def fetch_daily_bars(cfg: dict, symbols: List[str]) -> pd.DataFrame:
             "limit": 10000,
             "feed": cfg["data_feed"],
         }
-
         next_page_token = None
         while True:
             if next_page_token:
@@ -173,6 +206,59 @@ def fetch_daily_bars(cfg: dict, symbols: List[str]) -> pd.DataFrame:
     df = pd.DataFrame(all_rows)
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     return df.sort_values(["symbol", "timestamp"])
+
+
+def fetch_daily_bars_stooq(cfg: dict, symbols: List[str]) -> pd.DataFrame:
+    if not symbols:
+        return pd.DataFrame()
+
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=cfg["lookback_days"])
+    frames: list[pd.DataFrame] = []
+
+    for symbol in symbols:
+        url = f"https://stooq.com/q/d/l/?s={symbol.lower()}.us&i=d"
+        try:
+            response = requests.get(url, timeout=20)
+            if response.status_code != 200 or "Date,Open,High,Low,Close,Volume" not in response.text:
+                continue
+
+            df = pd.read_csv(pd.io.common.StringIO(response.text))
+            if df.empty:
+                continue
+
+            df["Date"] = pd.to_datetime(df["Date"], utc=True, errors="coerce")
+            df = df.dropna(subset=["Date", "Close"]).copy()
+            df = df[df["Date"] >= cutoff].copy()
+            if df.empty:
+                continue
+
+            df = df.rename(
+                columns={
+                    "Date": "timestamp",
+                    "Open": "open",
+                    "High": "high",
+                    "Low": "low",
+                    "Close": "close",
+                    "Volume": "volume",
+                }
+            )
+            df["symbol"] = symbol
+            frames.append(df[["symbol", "timestamp", "open", "high", "low", "close", "volume"]])
+        except Exception:
+            continue
+
+    if not frames:
+        return pd.DataFrame()
+
+    all_df = pd.concat(frames, ignore_index=True)
+    all_df["timestamp"] = pd.to_datetime(all_df["timestamp"], utc=True)
+    return all_df.sort_values(["symbol", "timestamp"])
+
+
+def fetch_daily_bars(cfg: dict, symbols: List[str]) -> pd.DataFrame:
+    if cfg["data_provider"] == "alpaca":
+        return fetch_daily_bars_alpaca(cfg, symbols)
+    return fetch_daily_bars_stooq(cfg, symbols)
 
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -348,12 +434,11 @@ def push_google_sheet(green_df: pd.DataFrame, yellow_df: pd.DataFrame, latest_sn
     summary_rows = [
         ["metric", "value"],
         ["updated_at_utc", dt.datetime.now(dt.timezone.utc).isoformat()],
+        ["provider", cfg["data_provider"]],
         ["green_count", str(len(green_df))],
         ["yellow_count", str(len(yellow_df))],
         ["green_rule", "close > ema_200 AND close < ema_48 AND rsi_14 < 55"],
         ["yellow_rule", f"within {cfg['yellow_tolerance_pct']:.1f}% of entering green rule"],
-        ["universe_exchanges", ", ".join(cfg["universe_exchanges"])],
-        ["feed", cfg["data_feed"]],
     ]
     green_rows = [green_df.columns.tolist()] + green_df.fillna("").astype(str).values.tolist()
     yellow_rows = [yellow_df.columns.tolist()] + yellow_df.fillna("").astype(str).values.tolist()
@@ -370,20 +455,14 @@ def _send_discord_message(webhook: str, content: str) -> None:
     response.raise_for_status()
 
 
-def send_discord_alerts(
-    cfg: dict,
-    csv_path: Path,
-    total: int,
-    new_entries: list[str],
-    remaining: list[str],
-    exited: list[str],
-) -> None:
+def send_discord_alerts(cfg: dict, csv_path: Path, total: int, new_entries: list[str], remaining: list[str], exited: list[str]) -> None:
     webhook = cfg["discord_webhook_url"]
     if not webhook:
         return
 
     summary = (
         "📉 **EMAtrix Daily Band Scan**\n"
+        f"Provider: {cfg['data_provider']}\n"
         "Rule: Close > EMA200, Close < EMA48, RSI14 < 55\n"
         f"Total in green band: **{total}**\n"
         f"CSV: `{csv_path}`"
@@ -405,18 +484,18 @@ def run_scan(dry_run: bool = False, max_symbols: int | None = None) -> None:
     if not ok:
         raise ValueError("Invalid config:\n- " + "\n- ".join(messages))
 
-    print("Loading US tradable universe from Alpaca assets...")
-    universe = get_us_universe(cfg)
+    print(f"Loading US universe using provider={cfg['data_provider']}...")
+    universe = get_universe(cfg)
     if max_symbols:
         universe = universe[:max_symbols]
-        print(f"Dry run symbol limit enabled: {max_symbols}")
+        print(f"Run symbol limit enabled: {max_symbols}")
 
-    print(f"Universe size: {len(universe)} symbols across {', '.join(cfg['universe_exchanges'])}")
+    print(f"Universe size: {len(universe)} symbols")
 
     print("Fetching daily bars...")
     bars = fetch_daily_bars(cfg, universe)
     if bars.empty:
-        raise RuntimeError("No bars returned from Alpaca.")
+        raise RuntimeError("No bars returned from selected provider.")
 
     print("Computing indicators...")
     indicators = compute_indicators(bars)
@@ -449,13 +528,6 @@ def run_scan(dry_run: bool = False, max_symbols: int | None = None) -> None:
             send_discord_alerts(cfg, green_csv_path, len(green), new_entries, remaining, exited)
         except Exception as exc:
             print(f"Warning: Discord update failed: {exc}")
-
-    print("\nTop 20 green symbols:")
-    if green.empty:
-        print("No green matches today.")
-    else:
-        display_cols = ["symbol", "close", "ema_48", "ema_200", "rsi_14"]
-        print(green[display_cols].head(20).to_string(index=False))
 
 
 def parse_args() -> argparse.Namespace:

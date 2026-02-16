@@ -1,165 +1,109 @@
 # EMAtrix (US Daily EMA/RSI Scanner)
 
-EMAtrix runs a **daily post-market scan** for US tradable equities and flags symbols in a research band:
+EMAtrix runs a daily post-market scan for US stocks and flags symbols in this research band:
 
 - `close > ema_200`
 - `close < ema_48`
-- `rsi_14 < 55` (Wilder RSI)
+- `rsi_14 < 55`
 
-It also builds a **yellow watchlist** for symbols within a configurable tolerance of entering the green band.
+It also builds a yellow watchlist for symbols within a configurable tolerance of entering the green band.
 
-## What’s new for non-technical setup
+## Free API option (now default)
 
-- `setup_and_run.sh` creates a local virtual environment, installs dependencies, checks config, and runs a safe dry-run.
-- `scanner.py --check-config` gives a guided config validation report.
-- `scanner.py --dry-run` writes CSV outputs but skips Google Sheets and Discord notifications.
-- `build_dashboard.py` generates local 2D and 3D HTML charts from the latest snapshot CSV.
-- `kalshi_demo.py` is a starter scaffold for Kalshi demo configuration checks.
+You asked for a free online API path. EMAtrix now supports:
 
-## Quick start (recommended)
+- `DATA_PROVIDER=stooq` (**default**, free/no key)
+- `DATA_PROVIDER=alpaca` (if you prefer Alpaca)
+
+Stooq mode uses:
+- SEC public company ticker list for symbol discovery
+- Stooq daily CSV endpoint for OHLCV bars
+
+## Quick start (non-technical)
 
 ```bash
 ./setup_and_run.sh
 ```
 
-If `.env` does not exist, the script creates it from `.env.example` and stops so you can add your keys.
+What this does:
+1. Creates `.venv`
+2. Installs dependencies
+3. Creates `.env` from `.env.example` if missing
+4. Runs config check
+5. Runs safe dry-run (`--dry-run --max-symbols 200`)
 
-After adding keys, run again.
-
-## Outputs
-
-- Local CSV files:
-  - `results/scan_YYYY-MM-DD.csv` (green band)
-  - `results/yellow_YYYY-MM-DD.csv` (near-green)
-  - `results/snapshot_YYYY-MM-DD.csv` (full latest-feature snapshot for all symbols)
-- Google Sheets dashboard tabs (optional)
-- Discord notifications (optional)
-
-## Why this design
-
-- Uses Alpaca assets API for a broker-like US tradable universe.
-- Uses Alpaca daily market bars for indicator calculations.
-- Exports full snapshot features so the data is ready for future 2D/3D analytics and visualization tooling.
-- Tracks state across runs for **new / remaining / exited** green-band notifications.
-
-## Setup
-
-### 1) Create and activate a virtual environment
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-### 2) Configure environment variables
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` and fill your credentials.
-
-## Environment variables
-
-Required:
-
-- `ALPACA_API_KEY`
-- `ALPACA_API_SECRET`
-
-Optional scanner settings:
-
-- `ALPACA_BASE_URL` (default: `https://paper-api.alpaca.markets`)
-- `ALPACA_DATA_URL` (default: `https://data.alpaca.markets`)
-- `ALPACA_DATA_FEED` (default: `iex`)
-- `LOOKBACK_DAYS` (default: `320`)
-- `UNIVERSE_EXCHANGES` (default: `NYSE,NASDAQ,AMEX`)
-- `INCLUDE_ETFS` (`true`/`false`, default: `true`)
-- `YELLOW_TOLERANCE_PCT` (default: `10`)
-- `DISCORD_WEBHOOK_URL`
-- `GOOGLE_SHEET_ID`
-- `GOOGLE_SERVICE_ACCOUNT_FILE`
-- `RESULTS_DIR` (default: `results`)
-
-Kalshi demo scaffold (optional):
-
-- `KALSHI_BASE_URL` (default: `https://demo-api.kalshi.co`)
-- `KALSHI_EMAIL`
-- `KALSHI_PASSWORD`
-
-## Run scanner
-
-### Config check
+## Main commands
 
 ```bash
 python scanner.py --check-config
-```
-
-### Safe first run (no external notifications)
-
-```bash
 python scanner.py --dry-run --max-symbols 200
-```
-
-### Full run
-
-```bash
 python scanner.py
 ```
 
-## Google Sheets tabs
+## Output files
 
-When Google Sheets integration is enabled, EMAtrix updates these tabs:
+- `results/scan_YYYY-MM-DD.csv` (green band)
+- `results/yellow_YYYY-MM-DD.csv` (near-green)
+- `results/snapshot_YYYY-MM-DD.csv` (full latest snapshot, visualization-ready)
 
-- `scan_YYYY_MM_DD` (daily green symbols)
-- `dashboard_summary`
-- `dashboard_green`
-- `dashboard_yellow`
-- `dashboard_snapshot` (full latest symbol feature table)
+## 2D + 3D charts
 
-## Discord notifications
-
-When webhook integration is enabled, EMAtrix sends:
-
-1. Daily overall summary
-2. New companies entering green band
-3. Companies remaining in green band
-4. Companies exited from green band
-
-## Local 2D + 3D chart generation
-
-After you have at least one `snapshot_*.csv` file:
+After you have a snapshot CSV:
 
 ```bash
 python build_dashboard.py
 ```
 
-Outputs:
-
+Creates:
 - `dashboards/ematrix_2d_latest.html`
 - `dashboards/ematrix_3d_latest.html`
 
-Open those HTML files in your browser.
+## Environment variables
 
-## Kalshi demo scaffold check
+Core:
+- `DATA_PROVIDER=stooq|alpaca`
+- `LOOKBACK_DAYS`
+- `SYMBOL_LIMIT`
+- `YELLOW_TOLERANCE_PCT`
+- `RESULTS_DIR`
 
-```bash
-python kalshi_demo.py
-```
+Stooq mode:
+- `STOOQ_SYMBOL_SOURCE=sec`
 
-This currently checks environment setup and a public API status endpoint. Auth wiring is intentionally deferred until you provide credentials.
+Alpaca mode:
+- `ALPACA_API_KEY`
+- `ALPACA_API_SECRET`
+- `ALPACA_BASE_URL`
+- `ALPACA_DATA_URL`
+- `ALPACA_DATA_FEED`
 
-## Scheduling
+Optional integrations:
+- `DISCORD_WEBHOOK_URL`
+- `GOOGLE_SHEET_ID`
+- `GOOGLE_SERVICE_ACCOUNT_FILE`
 
-Suggested scheduler target: **6:00 PM ET on market weekdays**.
+Kalshi demo scaffold:
+- `KALSHI_BASE_URL`
+- `KALSHI_EMAIL`
+- `KALSHI_PASSWORD`
 
-Example cron (set host timezone appropriately):
+## Google Sheets dashboard tabs
 
-```cron
-0 18 * * 1-5 cd /path/to/ChatGPT-EMA-Strat && /path/to/venv/bin/python scanner.py >> scanner.log 2>&1
-```
+When configured, EMAtrix updates:
+- `scan_YYYY_MM_DD`
+- `dashboard_summary`
+- `dashboard_green`
+- `dashboard_yellow`
+- `dashboard_snapshot`
 
-## Notes
+## Discord notifications
 
-- This is a research scanner, not execution automation.
-- Full snapshot exports are designed as the data foundation for future charting (2D and 3D views).
+When configured, EMAtrix sends:
+1. Daily summary
+2. New entries
+3. Remaining in band
+4. Exited band
+
+## Schedule suggestion
+
+Run at ~6:00 PM ET on market weekdays.
