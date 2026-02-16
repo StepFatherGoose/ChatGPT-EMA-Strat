@@ -1,27 +1,32 @@
-# EMA Strat Bot (NYSE Daily Scanner)
+# EMAtrix (US Daily EMA/RSI Scanner)
 
-This project runs a **daily post-market scan** for NYSE-listed stocks and flags symbols that meet:
+EMAtrix runs a **daily post-market scan** for US tradable equities and flags symbols in a research band:
 
-- Close > 200 EMA
-- Close < 48 EMA
-- RSI(14) < 55
+- `close > ema_200`
+- `close < ema_48`
+- `rsi_14 < 55` (Wilder RSI)
 
-It supports output to:
+It also builds a **yellow watchlist** for symbols within a configurable tolerance of entering the green band.
 
-- Local CSV
-- Google Sheets (optional)
-- Discord webhook alerts (optional)
+## Outputs
 
-## Why this architecture
+- Local CSV files:
+  - `results/scan_YYYY-MM-DD.csv` (green band)
+  - `results/yellow_YYYY-MM-DD.csv` (near-green)
+  - `results/snapshot_YYYY-MM-DD.csv` (full latest-feature snapshot for all symbols)
+- Google Sheets dashboard tabs (optional)
+- Discord notifications (optional)
 
-- **Universe source:** Alpaca Assets API (active, tradable US equities filtered to NYSE)
-- **Price data:** Alpaca Market Data (daily bars)
-- **Indicators:** Local pandas calculations (EMA 13/48/100/200 + RSI14)
-- **Automation:** Cron / Task Scheduler on your local machine
+## Why this design
+
+- Uses Alpaca assets API for a broker-like US tradable universe.
+- Uses Alpaca daily market bars for indicator calculations.
+- Exports full snapshot features so the data is ready for future 2D/3D analytics and visualization tooling.
+- Tracks state across runs for **new / remaining / exited** green-band notifications.
 
 ## Setup
 
-1. Create and activate a Python virtual environment.
+1. Create/activate a Python virtual environment.
 2. Install dependencies:
 
 ```bash
@@ -36,7 +41,7 @@ cp .env.example .env
 
 ## Environment variables
 
-Required for scanner:
+Required:
 
 - `ALPACA_API_KEY`
 - `ALPACA_API_SECRET`
@@ -45,10 +50,14 @@ Optional:
 
 - `ALPACA_BASE_URL` (default: `https://paper-api.alpaca.markets`)
 - `ALPACA_DATA_URL` (default: `https://data.alpaca.markets`)
+- `ALPACA_DATA_FEED` (default: `iex`)
 - `LOOKBACK_DAYS` (default: `320`)
+- `UNIVERSE_EXCHANGES` (default: `NYSE,NASDAQ,AMEX`)
+- `INCLUDE_ETFS` (`true`/`false`, default: `true`)
+- `YELLOW_TOLERANCE_PCT` (default: `10`)
 - `DISCORD_WEBHOOK_URL`
 - `GOOGLE_SHEET_ID`
-- `GOOGLE_SERVICE_ACCOUNT_FILE` (path to service account JSON)
+- `GOOGLE_SERVICE_ACCOUNT_FILE`
 - `RESULTS_DIR` (default: `results`)
 
 ## Run manually
@@ -57,35 +66,36 @@ Optional:
 python scanner.py
 ```
 
-Outputs:
+## Google Sheets tabs
 
-- `results/scan_YYYY-MM-DD.csv`
-- optional Google Sheet tab update
-- optional Discord message with summary and top symbols
+When Google Sheets integration is enabled, EMAtrix updates these tabs:
 
+- `scan_YYYY_MM_DD` (daily green symbols)
+- `dashboard_summary`
+- `dashboard_green`
+- `dashboard_yellow`
+- `dashboard_snapshot` (full latest symbol feature table)
 
-## Google Sheets dashboard tabs
+## Discord notifications
 
-When Google Sheets integration is enabled, EMAtrix now updates dedicated dashboard tabs:
+When webhook integration is enabled, EMAtrix sends:
 
-- `dashboard_summary`: update timestamp + green/yellow counts and rule definitions.
-- `dashboard_green`: symbols currently in the green band (rule match).
-- `dashboard_yellow`: symbols within ~10% of entering green based on the largest gap among:
-  - getting above EMA200,
-  - getting below EMA48,
-  - getting RSI14 under 55.
+1. Daily overall summary
+2. New companies entering green band
+3. Companies remaining in green band
+4. Companies exited from green band
 
-Color labels are logical labels in the data (`green`/`yellow`) so you can apply conditional formatting in Sheets.
+## Scheduling
 
-## Automate daily after market close
+Suggested scheduler target: **6:00 PM ET on market weekdays**.
 
-Example cron (6:10 PM ET daily):
+Example cron (set host timezone appropriately):
 
 ```cron
-10 18 * * 1-5 cd /path/to/ChatGPT-EMA-Strat && /path/to/venv/bin/python scanner.py >> scanner.log 2>&1
+0 18 * * 1-5 cd /path/to/ChatGPT-EMA-Strat && /path/to/venv/bin/python scanner.py >> scanner.log 2>&1
 ```
 
 ## Notes
 
-- This is a **research scanner**, not auto-execution.
-- Start with this scan, then wire into a dedicated backtest module for entry/exit rule exploration.
+- This is a research scanner, not execution automation.
+- Full snapshot exports are designed as the data foundation for future charting (2D and 3D views).
