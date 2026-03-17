@@ -106,13 +106,26 @@ def load_and_prepare_data(input_csv: Path, input_tz: str | None) -> pd.DataFrame
     out = df[[ts_col, open_col, high_col]].copy()
     out.columns = ["timestamp", "open", "high"]
 
-    out["timestamp"] = pd.to_datetime(out["timestamp"], errors="coerce")
-    out = out.dropna(subset=["timestamp", "open", "high"]).copy()
+    source_tz = input_tz or RTH_TZ
+    timestamp_text = out["timestamp"].astype(str).str.strip()
+    has_utc_offset = timestamp_text.str.contains(r"(Z|[+-]\d{2}:?\d{2})$", regex=True, na=False)
 
-    # Handle timezone conversion safely.
-    if out["timestamp"].dt.tz is None:
-        source_tz = input_tz or RTH_TZ
-        out["timestamp"] = out["timestamp"].dt.tz_localize(source_tz)
+    # Parse offset timestamps directly to UTC so mixed DST offsets remain vectorized.
+    parsed_offset_utc = pd.to_datetime(
+        timestamp_text.where(has_utc_offset), errors="coerce", utc=True
+    )
+
+    # Parse naive timestamps separately, then localize to source timezone and convert to UTC.
+    parsed_naive = pd.to_datetime(timestamp_text.where(~has_utc_offset), errors="coerce")
+    parsed_naive_utc = pd.Series(pd.NaT, index=out.index, dtype="datetime64[ns, UTC]")
+    naive_valid = parsed_naive.notna()
+    if naive_valid.any():
+        parsed_naive_utc.loc[naive_valid] = (
+            parsed_naive.loc[naive_valid].dt.tz_localize(source_tz).dt.tz_convert("UTC")
+        )
+
+    out["timestamp"] = parsed_offset_utc.where(has_utc_offset, parsed_naive_utc)
+    out = out.dropna(subset=["timestamp", "open", "high"]).copy()
 
     out["timestamp"] = out["timestamp"].dt.tz_convert(RTH_TZ)
 
